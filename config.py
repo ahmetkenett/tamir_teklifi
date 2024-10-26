@@ -1,11 +1,3 @@
-# E-posta ayarları
-EMAIL = {
-    "sender_email": "",             # Gönderen e-posta adresi
-    "sender_password": "",          # E-posta şifresi
-    "smtp_server": "",              # SMTP sunucu adresi
-    "smtp_port":                    # SMTP sunucu portu
-}
-
 # Bayiler listesi
 bayiler_listesi = [
     "DIRMAN ELEKT-I.DIRMAN/S.DIRMAN VE A.CAKMAK ADI ORTAKLIGI",

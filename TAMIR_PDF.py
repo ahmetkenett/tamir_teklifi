@@ -1,136 +1,268 @@
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import sys
+import configparser
+from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton, QVBoxLayout, QFileDialog, QMessageBox, QComboBox)
+from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from PyPDF2 import PdfReader, PdfWriter
 from io import BytesIO
 import os
 import smtplib
-import threading
-import configparser
+import hashlib
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from email.mime.text import MIMEText
 import logging
-import re
 from config import *
 
 # Set up logging
 logging.basicConfig(filename='app.log', level=logging.INFO)
 
-class TamirTeklifUygulamasi:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("PDF Oluşturucu")
-        self.root.geometry("850x520")
+class EmailSender(QThread):
+    email_sent = pyqtSignal()
+    email_failed = pyqtSignal(str)
+
+    def __init__(self, email_info):
+        super().__init__()
+        self.email_info = email_info
+
+    def run(self):
+        try:
+            # Extract email information
+            sender_email = self.email_info['from']
+            sender_password = self.email_info['password']
+            smtp_server = self.email_info['smtp_server']
+            smtp_port = self.email_info['smtp_port']
+            receiver_email = self.email_info['to']
+            subject = self.email_info['subject']
+            pdf_path = self.email_info['pdf_path']
+
+            # Create email message
+            msg = MIMEMultipart()
+            msg['From'] = sender_email
+            msg['To'] = receiver_email
+            msg['Subject'] = subject
+            body = "Teklifinizin PDF dosyası ektedir."
+            msg.attach(MIMEText(body, 'plain'))
+
+            # Attach PDF
+            with open(pdf_path, "rb") as attachment:
+                part = MIMEApplication(attachment.read(), Name=os.path.basename(pdf_path))
+                part['Content-Disposition'] = f'attachment; filename="{os.path.basename(pdf_path)}"'
+                msg.attach(part)
+
+            # Connect to the SMTP server and send the email
+            with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
+                server.login(sender_email, sender_password)
+                server.send_message(msg)
+
+            self.email_sent.emit()  # Emit success signal
+        except Exception as e:
+            self.email_failed.emit(str(e))  # Emit error signal
+
+class LoginWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        # Başlangıç ayarları
+        self.setWindowTitle("Giriş")
+        self.setGeometry(100, 100, 300, 200)
+        self.setup_ui()
+        self.load_credentials()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        self.email_label = QLabel("E-posta adresi:")
+        self.email_input = QLineEdit(self)
+        self.password_label = QLabel("Şifre:")
+        self.password_input = QLineEdit(self)
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.submit_button = QPushButton("Giriş Yap")
+        self.submit_button.clicked.connect(self.verify_credentials)
+        layout.addWidget(self.email_label)
+        layout.addWidget(self.email_input)
+        layout.addWidget(self.password_label)
+        layout.addWidget(self.password_input)
+        layout.addWidget(self.submit_button)
+        self.setLayout(layout)
+
+    def load_credentials(self):
+        # Kaydedilen e-posta bilgilerini yükler
+        config = configparser.ConfigParser()
+        config.read("settings.ini")
+        self.saved_email = config.get("CREDENTIALS", "email", fallback="")
+        self.saved_password = config.get("CREDENTIALS", "password", fallback="")
+    
+        # Otomatik doldurma
+        self.email_input.setText(self.saved_email)
+        self.password_input.setText(self.saved_password)
+
+
+    def verify_credentials(self):
+        # Girilen şifreyi hash'e çevirip kaydedilen hash ile karşılaştırır
+        entered_email = self.email_input.text()
+        entered_password = self.password_input.text()
+
+        if entered_email == self.saved_email and entered_password == self.saved_password:
+            QMessageBox.information(self, "Başarılı", "Giriş başarılı.")
+            self.open_main_application()
+        else:
+            QMessageBox.critical(self, "Hata", "E-posta veya şifre hatalı.")
+
+    def open_main_application(self):
+        # Ana uygulamayı açma
+        self.main_window = RepairOfferApplication()
+        self.main_window.show()
+        self.close()  # Giriş penceresini kapat
+
+class RepairOfferApplication(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("PDF Oluşturucu")
+        self.setGeometry(100, 100, 850, 520)
         self.pdf_template_path = ""
         self.config_file = "settings.ini"
         self.setup_gui()
         self.load_pdf_template_path()
 
     def setup_gui(self):
-        title_label = tk.Label(self.root, text="FAST TAMIR TEKLIF PROGRAMI", font=("Helvetica", 18, "bold"), bg="#f0f0f0", fg="#000000")
-        title_label.grid(row=0, column=0, columnspan=2, pady=10)
+        # Başlık
+        title_label = QLabel("FAST TAMIR TEKLIF PROGRAMI", self)
+        title_label.setStyleSheet("font-size: 18pt; font-weight: bold;")
+        title_label.setAlignment(Qt.AlignCenter)
 
-        tk.Button(self.root, text="PDF Şablonunu Seç", font=("Helvetica", 16, "bold"), command=self.select_pdf_template, bg="#4CAF50", fg="white").grid(row=1, column=0, padx=10, pady=10)
-        self.label_selected_file = tk.Label(self.root, text="Seçilen PDF: Henüz seçilmedi", font=("Helvetica", 16, "bold"), bg="#f0f0f0")
-        self.label_selected_file.grid(row=1, column=1, sticky="w")
+        # PDF şablonu seçme butonu
+        self.pdf_button = QPushButton("PDF Şablonunu Seç", self)
+        self.pdf_button.clicked.connect(self.select_pdf_template)
 
+        # Seçilen dosya etiketi
+        self.label_selected_file = QLabel("Seçilen PDF: Henüz seçilmedi", self)
+        self.label_selected_file.setStyleSheet("font-size: 14pt;")
+
+        # Bayi seçimi
+        self.dealer_label = QLabel("Kime:", self)
+        self.dealer_label.setStyleSheet("font-size: 14pt;")
+        self.dealer_combo = QComboBox(self)
+        self.dealer_combo.addItems(bayiler_listesi)
+        self.dealer_combo.setEnabled(False)
+        self.dealer_combo.currentIndexChanged.connect(self.bayi_secildi)
+
+        # Girdi kutuları
+        self.entries = {}
         self.create_form()
 
-        self.button_create_pdf = tk.Button(self.root, text="PDF Oluştur", font=("Helvetica", 14, "bold"), command=self.pdf_olustur, state="disabled", bg="#2196F3", fg="white")
-        self.button_create_pdf.grid(row=8, column=1, padx=300, pady=5, sticky="w")
+        # PDF oluşturma butonu
+        self.button_create_pdf = QPushButton("PDF Oluştur", self)
+        self.button_create_pdf.setEnabled(False)
+        self.button_create_pdf.clicked.connect(self.pdf_olustur)
 
-        self.button_send_email = tk.Button(self.root, text="E-posta Gönder", font=("Helvetica", 14, "bold"), command=self.send_email_threaded, state="disabled", bg="#2196F3", fg="white")
-        self.button_send_email.grid(row=9, column=1, padx=300, pady=5, sticky="w")
+        # E-posta gönderme butonu
+        self.button_send_email = QPushButton("E-posta Gönder", self)
+        self.button_send_email.setEnabled(False)
+        self.button_send_email.clicked.connect(self.send_email_threaded)
+
+        # Layout ayarları
+        layout = QVBoxLayout()
+        layout.addWidget(title_label)
+        layout.addWidget(self.pdf_button)
+        layout.addWidget(self.label_selected_file)
+        layout.addWidget(self.dealer_label)
+        layout.addWidget(self.dealer_combo)
+
+        # Girdi alanlarını ekleyelim
+        for label, entry in self.entries.items():
+            layout.addWidget(QLabel(f"{label}:"))
+            layout.addWidget(entry)
+
+        layout.addWidget(self.button_create_pdf)
+        layout.addWidget(self.button_send_email)
+        self.setLayout(layout)
 
     def create_form(self):
-        kime_var = tk.StringVar()
-        self.dropdown_kime = ttk.Combobox(self.root, textvariable=kime_var, values=bayiler_listesi, state="disabled", font=("Helvetica", 14), width=50)
-        self.dropdown_kime.grid(row=2, column=1, padx=10, pady=5, sticky="w")
-        self.dropdown_kime.bind("<<ComboboxSelected>>", self.bayi_secildi)
-
-        tk.Label(self.root, text="Kime:", font=("Arial", 15, "bold"), bg="#f0f0f0", fg="black").grid(row=2, column=0, padx=5, pady=5, sticky="e")
-        tk.Label(self.root, text="by Ahmet Erdem Kenet", font=("Arial", 8, "bold"), bg="#f0f0f0", fg="black").grid(row=10, column=0, padx=5, pady=5, sticky="e")
-
-        self.entries = {}
         for label_text in ["Telefon", "Faks", "Adres", "e-Mail", "Model", "Seri No", "Tamir Fiyatı"]:
-            self.create_entry(label_text)
-
-    def create_entry(self, label_text):
-        entry = tk.Entry(self.root, font=("Helvetica", 14), width=20 if label_text != "Tamir Fiyatı" else 6, state="disabled")
-        self.entries[label_text] = entry
-
-        row = len(self.entries) + 2
-        tk.Label(self.root, text=f"{label_text}:", font=("Arial", 15, "bold"), bg="#f0f0f0").grid(row=row, column=0, padx=5, pady=8, sticky="e")
-        entry.grid(row=row, column=1, padx=10, pady=5, sticky="w")
+            entry = QLineEdit(self)
+            entry.setEnabled(False)
+            self.entries[label_text] = entry
 
     def select_pdf_template(self):
-        file_path = filedialog.askopenfilename(title="PDF Şablon Dosyasını Seçin", filetypes=[("PDF Dosyaları", "*.pdf")])
-        if file_path:
-            self.label_selected_file.config(text=file_path, foreground="green")
-            self.pdf_template_path = file_path
-            self.activate_fields()
-            self.save_pdf_template_path()
+            options = QFileDialog.Options()
+            file_path, _ = QFileDialog.getOpenFileName(self, "PDF Şablon Dosyasını Seçin", "", "PDF Dosyaları (*.pdf);;Tüm Dosyalar (*)", options=options)
+            if file_path:
+                self.label_selected_file.setText(file_path)
+                self.pdf_template_path = file_path
+                self.activate_fields()
+                self.save_pdf_template_path()
 
     def load_pdf_template_path(self):
         config = configparser.ConfigParser()
-        if not os.path.exists(self.config_file):
-            config['SETTINGS'] = {'pdf_template_path': ''}
-            with open(self.config_file, 'w') as configfile:
-                config.write(configfile)
-
+        # Dosyayı okuma denemesi
         try:
             config.read(self.config_file)
-            self.pdf_template_path = config.get("SETTINGS", "pdf_template_path", fallback="")
-            if self.pdf_template_path:
-                self.label_selected_file.config(text=self.pdf_template_path, foreground="green")
-                self.activate_fields()
-                logging.info("Loaded PDF template path from config.")
-        except configparser.Error as e:
-            messagebox.showerror("Hata", f"Config dosyası okunamadı: {str(e)}")
+            if "SETTINGS" in config:
+                # Ayarları okuma
+                self.pdf_template_path = config.get("SETTINGS", "pdf_template_path")
+                if self.pdf_template_path:
+                    self.label_selected_file.setText(self.pdf_template_path)
+                    self.activate_fields()
+                    logging.info("PDF şablonu konfigürasyondan yüklendi.")
+                else:
+                    logging.warning("PDF şablon yolu boş. Konfigürasyondan yüklenemedi.")
+            else:
+                # Eğer 'SETTINGS' bölümü yoksa, yeni bir bölüm oluştur
+                config["SETTINGS"] = {'pdf_template_path': ''}
+                with open(self.config_file, 'w') as configfile:
+                    config.write(configfile)
+                    logging.info("Yeni 'SETTINGS' bölümü oluşturuldu.")
+        except Exception as e:
+            logging.error(f"Konfigürasyon dosyası okunurken hata oluştu: {str(e)}")
 
     def save_pdf_template_path(self):
         config = configparser.ConfigParser()
         config.read(self.config_file)
-        if 'SETTINGS' not in config:
-            config['SETTINGS'] = {}
 
-        config['SETTINGS']['pdf_template_path'] = self.pdf_template_path
-        with open(self.config_file, 'w') as configfile:
-            config.write(configfile)
-            logging.info("Saved PDF template path to config.")
+        if "SETTINGS" not in config:
+            config["SETTINGS"] = {}
+        
+        config["SETTINGS"]["pdf_template_path"] = self.pdf_template_path
+
+        # Dosyaya yazma denemesi
+        try:
+            with open(self.config_file, 'w') as configfile:
+                config.write(configfile)
+                logging.info("PDF şablon yolu config'e kaydedildi.")
+        except Exception as e:
+            logging.error(f"Konfigürasyon dosyası yazılırken hata oluştu: {str(e)}")
+
 
     def activate_fields(self):
-        self.dropdown_kime.config(state="readonly")
+        self.dealer_combo.setEnabled(True)
         for entry in self.entries.values():
-            entry.config(state="normal")
-        self.button_create_pdf.config(state="normal")
+            entry.setEnabled(True)
+        self.button_create_pdf.setEnabled(True)
 
-    def bayi_secildi(self, event):
-        self.populate_entries(self.dropdown_kime.get())
+    def bayi_secildi(self):
+        bayi = self.dealer_combo.currentText()
+        self.populate_entries(bayi)
 
     def populate_entries(self, bayi: str):
-        self.entries["Telefon"].delete(0, tk.END)
-        self.entries["Telefon"].insert(0, telefonlar.get(bayi, ""))
-        self.entries["Faks"].delete(0, tk.END)
-        self.entries["Faks"].insert(0, fakslar.get(bayi, ""))
-        self.entries["Adres"].delete(0, tk.END)
-        self.entries["Adres"].insert(0, adresler.get(bayi, ""))
-        self.entries["e-Mail"].delete(0, tk.END)
-        self.entries["e-Mail"].insert(0, email_adresleri.get(bayi, ""))
+        self.entries["Telefon"].setText(telefonlar.get(bayi, ""))
+        self.entries["Faks"].setText(fakslar.get(bayi, ""))
+        self.entries["Adres"].setText(adresler.get(bayi, ""))
+        self.entries["e-Mail"].setText(email_adresleri.get(bayi, ""))
+        self.entries["Model"].setText("")  # Model ve Seri No'yu temizle
+        self.entries["Seri No"].setText("")
+        self.button_send_email.setEnabled(False)
 
     def pdf_olustur(self):
         if not self.pdf_template_path:
-            messagebox.showerror("Hata", "Lütfen önce bir PDF şablonu seçin!")
+            QMessageBox.critical(self, "Hata", "Lütfen önce bir PDF şablonu seçin!")
             return
 
-        fields = [self.dropdown_kime.get()] + [entry.get() for entry in self.entries.values()]
+        fields = [self.dealer_combo.currentText()] + [entry.text() for entry in self.entries.values()]
         if not all(fields):
-            messagebox.showerror("Hata", "Lütfen tüm alanları doldurun!")
+            QMessageBox.critical(self, "Hata", "Lütfen tüm alanları doldurun!")
             return
 
-        output_pdf_path = os.path.join(os.path.dirname(self.pdf_template_path), f"{self.entries['Seri No'].get()}.pdf")
+        output_pdf_path = os.path.join(os.path.dirname(self.pdf_template_path), f"{self.entries['Seri No'].text()}.pdf")
         pdf_reader = PdfReader(self.pdf_template_path)
         pdf_writer = PdfWriter()
 
@@ -139,86 +271,59 @@ class TamirTeklifUygulamasi:
 
         self.write_to_pdf(c)
         c.save()
+
         packet.seek(0)
         new_pdf = PdfReader(packet)
-
         page = pdf_reader.pages[0]
         page.merge_page(new_pdf.pages[0])
         pdf_writer.add_page(page)
 
-        try:
-            with open(output_pdf_path, "wb") as output_pdf_file:
-                pdf_writer.write(output_pdf_file)
-            messagebox.showinfo("Başarılı", f"{self.entries['Seri No'].get()} seri numaralı teklif oluşturuldu!")
-            self.button_send_email.config(state="normal")
-            logging.info(f"PDF created: {output_pdf_path}")
-        except Exception as e:
-            messagebox.showerror("Hata", f"PDF oluşturulurken hata: {str(e)}")
-            logging.error(f"PDF creation error: {e}")
+        with open(output_pdf_path, "wb") as outputStream:
+            pdf_writer.write(outputStream)
+
+        QMessageBox.information(self, "Başarılı", f"{self.entries['Seri No'].text()} seri numaralı teklif oluşturuldu.")
+        logging.info(f"{self.entries['Seri No'].text()} seri numaralı teklif oluşturuldu.")
+        self.button_send_email.setEnabled(True)
 
     def write_to_pdf(self, canvas):
-        canvas.drawString(102, 571, self.dropdown_kime.get())
-        canvas.drawString(102, 555, self.entries["Telefon"].get())
-        canvas.drawString(102, 539, self.entries["Faks"].get())
-        canvas.drawString(102, 525, self.entries["Adres"].get())
-        canvas.drawString(102, 343, self.entries["Model"].get())
-        canvas.drawString(320, 343, self.entries["Seri No"].get())
-        canvas.drawString(480, 343, f"{self.entries['Tamir Fiyatı'].get()} TL + KDV")
+        canvas.drawString(102, 571, self.dealer_combo.currentText())
+        canvas.drawString(102, 555, self.entries['Telefon'].text())
+        canvas.drawString(102, 539, self.entries['Faks'].text())
+        canvas.drawString(102, 525, self.entries['Adres'].text())
+        canvas.drawString(102, 343, self.entries['Model'].text())
+        canvas.drawString(320, 343, self.entries['Seri No'].text())
+        canvas.drawString(480, 343, f"{self.entries['Tamir Fiyatı'].text()} TL + KDV")
 
-    def is_valid_email(self, email):
-        regex = r'^[\w\.-]+@[\w\.-]+\.\w+$'
-        valid = re.match(regex, email)
-        if not valid:
-            logging.warning(f"Email adresi hatalı!: {email}")
-        return valid
-
-    def send_email(self):
-        secilen_bayi = self.dropdown_kime.get()
-        pdf_path = os.path.join(os.path.dirname(self.pdf_template_path), f"{self.entries['Seri No'].get()}.pdf")
-        email_address = self.entries["e-Mail"].get() or email_adresleri.get(secilen_bayi)
-
-        if not os.path.exists(pdf_path):
-            messagebox.showerror("Hata", "Lütfen önce PDF oluşturun.")
-            return
-
-        if not self.is_valid_email(email_address):
-            messagebox.showerror("Hata", "Geçersiz e-posta adresi.")
-            return
-
-        subject = "TAMİR TEKLİFİ"
-        body = "Merhaba,\n\nLütfen ekteki tamir teklifini inceleyin.\n\nSaygılarımızla,\n"
-
-        sender_email = EMAIL["sender_email"]
-        sender_password = EMAIL["sender_password"]
-        smtp_server = EMAIL["smtp_server"]
-        smtp_port = EMAIL["smtp_port"]
-
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = sender_email
-            msg['To'] = email_address
-            msg['Subject'] = subject
-            msg.attach(MIMEText(body, 'plain'))
-
-            with open(pdf_path, "rb") as f:
-                attach = MIMEApplication(f.read(), _subtype="pdf")
-                attach.add_header('Content-Disposition', 'attachment', filename=os.path.basename(pdf_path))
-                msg.attach(attach)
-
-            with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
-                server.login(sender_email, sender_password)
-                server.sendmail(sender_email, email_address, msg.as_string())
-
-            messagebox.showinfo("Başarılı", "{} için e-posta başarıyla gönderildi!".format(secilen_bayi))
-            logging.info(f"Email sent to {email_address}")
-        except Exception as e:
-            messagebox.showerror("Hata", "E-posta gönderimi sırasında bir hata oluştu: {}".format(str(e)))
-            logging.error(f"Email sending error: {e}")
+    def load_password(self):
+        # Kaydedilen şifreyi yükler
+        config = configparser.ConfigParser()
+        config.read("settings.ini")
+        return config.get("CREDENTIALS", "password", fallback="")
 
     def send_email_threaded(self):
-        threading.Thread(target=self.send_email).start()
+        email_info = {
+            'from': self.entries['e-Mail'].text(),
+            'to': self.entries['e-Mail'].text(),
+            'subject': f"Teklif - {self.entries['Seri No'].text()}",
+            'pdf_path': os.path.join(os.path.dirname(self.pdf_template_path), f"{self.entries['Seri No'].text()}.pdf"),
+            'smtp_server': "proxy.uzmanposta.com",
+            'smtp_port': 465,  # Port 465 SSL için
+            'password': self.load_password()
+        }
+
+        self.email_sender = EmailSender(email_info)
+        self.email_sender.email_sent.connect(self.on_email_sent)
+        self.email_sender.email_failed.connect(self.on_email_failed)
+        self.email_sender.start()  # E-posta gönderme iş parçacığını başlat
+
+    def on_email_sent(self):
+        QMessageBox.information(self, "Başarılı", "E-posta başarıyla gönderildi.")
+
+    def on_email_failed(self, error_message):
+        QMessageBox.critical(self, "Hata", f"E-posta gönderiminde hata: {error_message}")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = TamirTeklifUygulamasi(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    login_window = LoginWindow()
+    login_window.show()
+    sys.exit(app.exec_())
